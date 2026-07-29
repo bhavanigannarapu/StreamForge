@@ -65,6 +65,7 @@ Prometheus - Metrics Collection
 
 🏗 Architecture
 
+```
                 IoT Devices
                      │
                      ▼
@@ -84,6 +85,8 @@ Prometheus - Metrics Collection
                      │
                      ▼
           React Flow Dashboard
+
+```
 
 
 🔄 Workflow
@@ -113,7 +116,7 @@ Prometheus - Metrics Collection
 
 
 📂 Project Structure
-
+```
 StreamForge
 │
 ├── produce/
@@ -126,7 +129,7 @@ StreamForge
 ├── docker/
 ├── docs/
 └── README.md
-
+```
  Future Enhancements
 
 - Kubernetes Deployment
