@@ -139,4 +139,5 @@ StreamForge
 - Multi-Cluster Kafka Support
 - Alerting using Grafana
 
+- Updated by Vaishnavi on July 29, 2026.
 
