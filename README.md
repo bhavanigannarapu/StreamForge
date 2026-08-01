@@ -140,4 +140,29 @@ StreamForge
 - Alerting using Grafana
 
 - Updated by Vaishnavi on July 29, 2026.
+- Updated by Sai Kumar on Week 1 initial setup (Backend API & CORS Configuration).
+
+🚀 Quick Start Guide (Backend API & Dashboard)
+
+1. Install Dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+2. Start FastAPI Backend:
+```bash
+python run_api.py
+```
+FastAPI server will run on `http://localhost:8000`. Interactive API Docs are available at `http://localhost:8000/docs`.
+
+3. Start Telemetry Dashboard:
+```bash
+streamlit run dashboard/app.py
+```
+
+4. Run Unit Tests:
+```bash
+pytest tests/
+```
+
 
