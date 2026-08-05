@@ -1,0 +1,14 @@
+# Database persistence storage (RocksDB)
+rocksdb_data/
+
+# Python compiled bytecode & cache files
+__pycache__/
+*.pyc
+
+# Environment files & local variables
+.env
+*.env
+
+# IDE / Editor configurations
+.vscode/
+.idea/
