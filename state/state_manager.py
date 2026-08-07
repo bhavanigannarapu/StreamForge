@@ -7,7 +7,7 @@ db = Rdict("./rocksdb_data")
 
 # Kafka Consumer
 consumer = KafkaConsumer(
-    "filtered_truck_data",  # Change if your Kafka topic is different
+    "clean-telemetry",  # Change if your Kafka topic is different
     bootstrap_servers="localhost:9092",
     auto_offset_reset="earliest",
     enable_auto_commit=True,
