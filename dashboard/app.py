@@ -16,7 +16,21 @@ API_URL = "http://localhost:8000"
 
 st.title("⚡ StreamForge - Distributed Stream Processing Engine")
 st.caption("Real-Time IoT Fleet Telemetry, RocksDB State Viewer & Distributed System Health")
-
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #0e1117;
+    }
+    /* Prevents Streamlit from dimming/fading the UI during auto-refresh */
+    .stAppViewContainer {
+        opacity: 1 !important;
+    }
+    /* Smooths out transition effects */
+    div[data-testid="stAppViewBlockContainer"] {
+        transition: opacity 0.1s ease-in-out;
+    }
+</style>
+""", unsafe_allow_html=True)
 # Sidebar - Settings & Service Control
 st.sidebar.header("⚙️ Control Panel")
 auto_refresh = st.sidebar.checkbox("Auto Refresh (2s)", value=True)
@@ -175,7 +189,6 @@ with tab5:
     st.markdown(f"- **State Store:** [{api_endpoint_input}/state]({api_endpoint_input}/state)")
     st.markdown(f"- **DLQ Log:** [{api_endpoint_input}/dlq]({api_endpoint_input}/dlq)")
     st.markdown(f"- **Interactive Swagger Docs:** [{api_endpoint_input}/docs]({api_endpoint_input}/docs)")
-
 if auto_refresh:
-    time.sleep(2)
+    time.sleep(4)
     st.rerun()
