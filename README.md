@@ -140,29 +140,41 @@ StreamForge
 - Alerting using Grafana
 
 - Updated by Vaishnavi on July 29, 2026.
-- Updated by Sai Kumar on Week 1 initial setup (Backend API & CORS Configuration).
+- Updated by Sai Kumar on Week 1 & 2 (FastAPI Backend, CORS & Streamlit Dashboard).
+- Updated by Sai Kumar on Week 3 & 4 (WebSockets Streaming, Prometheus Exporter, Heat Map Analytics & Anomaly Alert Engine).
 
-🚀 Quick Start Guide (Backend API & Dashboard)
+🚀 Quick Start Guide (Backend API, Observability & Heat Map Dashboard)
 
 1. Install Dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Start FastAPI Backend:
+2. Start FastAPI Backend (v2.0):
 ```bash
 python run_api.py
 ```
-FastAPI server will run on `http://localhost:8000`. Interactive API Docs are available at `http://localhost:8000/docs`.
+- Server URL: `http://localhost:8000`
+- Interactive OpenAPI Docs: `http://localhost:8000/docs`
+- Prometheus Scraping Endpoint: `http://localhost:8000/prometheus`
+- CSV Telemetry Data Download: `http://localhost:8000/telemetry/export?format=csv`
 
-3. Start Telemetry Dashboard:
+3. Start Enterprise Streamlit Dashboard (Heat Map & Chaos Control Panel):
 ```bash
-streamlit run dashboard/app.py
+python -m streamlit run dashboard/app.py
+```
+- Real-Time Observability URL: `http://localhost:8501`
+
+4. Run Automated Test Suite (15/15 Passed):
+```bash
+python -m pytest tests/
 ```
 
-4. Run Unit Tests:
-```bash
-pytest tests/
-```
+⚡ New Week 3 & 4 Endpoints Implemented by Sai:
+- `WS /ws/telemetry`: WebSockets live telemetry push stream.
+- `GET /prometheus`: Standard Prometheus exporter metrics.
+- `GET /alerts`: Active threshold anomaly notifications.
+- `POST /alerts/clear`: Reset anomaly alert history.
+- `GET /telemetry/export?format=csv|json`: One-click data export.
 
 
