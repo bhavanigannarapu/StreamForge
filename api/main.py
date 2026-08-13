@@ -3,14 +3,37 @@ import json
 import time
 import random
 import threading
+import io
+import csv
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, WebSocket, WebSocketDisconnect, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from contextlib import asynccontextmanager
+
+from api.alerts import alert_engine, AlertRule
+from api.websocket_manager import ws_manager
+from api.middleware import RateLimitMiddleware
+
+# Shared In-Memory Data Store (Buffers latest readings & state)
+START_TIME = datetime.now(timezone.utc)
+telemetry_buffer: List[Dict[str, Any]] = []
+truck_state: Dict[str, Dict[str, Any]] = {}
+dlq_buffer: List[Dict[str, Any]] = []
+MAX_BUFFER_SIZE = 500
+
+TRUCK_IDS = [f"TRUCK-{i:03d}" for i in range(1, 11)]
+
+# Simulated GPS Fleet Base Coordinates (Center: Chicago/Midwest Route Grid)
+BASE_COORDS = {
+    f"TRUCK-{i:03d}": {"lat": 41.8781 + (i * 0.08), "lon": -87.6298 + (i * 0.06)}
+    for i in range(1, 11)
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -18,11 +41,12 @@ async def lifespan(app: FastAPI):
     t.start()
     yield
 
+
 # Initialize FastAPI App
 app = FastAPI(
-    title="StreamForge Backend API",
-    description="Distributed Event Processor API for IoT Fleet Telemetry",
-    version="1.0.0",
+    title="StreamForge Distributed Telemetry API",
+    description="Distributed Event Processor API for IoT Fleet Telemetry, Prometheus Observability & WebSockets",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -35,15 +59,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared In-Memory Data Store (Buffers latest readings & state)
-START_TIME = datetime.now(timezone.utc)
-telemetry_buffer: List[Dict[str, Any]] = []
-truck_state: Dict[str, Dict[str, Any]] = {}
-dlq_buffer: List[Dict[str, Any]] = []
-MAX_BUFFER_SIZE = 500
-
-TRUCK_IDS = [f"TRUCK-{i:03d}" for i in range(1, 11)]
-
 
 class TelemetryItem(BaseModel):
     event_id: str = Field(..., description="Unique UUID for event deduplication")
@@ -51,6 +66,8 @@ class TelemetryItem(BaseModel):
     temperature: float = Field(..., description="Sensor temperature reading in Celsius")
     speed: float = Field(..., description="Truck speed in km/h")
     timestamp: str = Field(..., description="ISO 8601 Timestamp")
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 class HealthResponse(BaseModel):
@@ -61,31 +78,40 @@ class HealthResponse(BaseModel):
     timestamp: str
     kafka_connected: bool
     total_events_processed: int
+    active_alerts_count: int
 
 
 def generate_mock_telemetry_event() -> Dict[str, Any]:
-    """Generates a realistic IoT truck telemetry reading."""
+    """Generates a realistic IoT truck telemetry reading with GPS coordinates."""
     truck_id = random.choice(TRUCK_IDS)
     # Occasionally generate invalid temperatures (< -5°C) to demonstrate DLQ routing
     is_invalid = random.random() < 0.08
     temp = round(random.uniform(-15.0, -6.0), 2) if is_invalid else round(random.uniform(5.0, 38.0), 2)
     
+    # Slight GPS jitter for movement simulation
+    base = BASE_COORDS[truck_id]
+    lat = round(base["lat"] + random.uniform(-0.02, 0.02), 4)
+    lon = round(base["lon"] + random.uniform(-0.02, 0.02), 4)
+    BASE_COORDS[truck_id] = {"lat": lat, "lon": lon}
+
     return {
         "event_id": f"evt-{int(time.time()*1000)}-{random.randint(1000, 9999)}",
         "truck_id": truck_id,
         "temperature": temp,
         "speed": round(random.uniform(40.0, 95.0), 1),
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "latitude": lat,
+        "longitude": lon
     }
 
 
 def process_telemetry_record(record: Dict[str, Any]):
-    """Processes incoming telemetry event and updates local state."""
+    """Processes incoming telemetry event, checks alert rules, and updates local state."""
     global telemetry_buffer, truck_state, dlq_buffer
 
     # DLQ Filter Rule (Temperature < -5°C or invalid schema)
     if record.get("temperature", 0) < -5.0:
-        record["dlq_reason"] = f"Temperature out of valid range ({record.get('temperature')}°C < -5°C)"
+        record["dlq_reason"] = f"Temperature out of valid boundary ({record.get('temperature')}°C < -5°C)"
         dlq_buffer.append(record)
         if len(dlq_buffer) > MAX_BUFFER_SIZE:
             dlq_buffer.pop(0)
@@ -96,6 +122,9 @@ def process_telemetry_record(record: Dict[str, Any]):
     if len(telemetry_buffer) > MAX_BUFFER_SIZE:
         telemetry_buffer.pop(0)
 
+    # Evaluate Anomaly Alert Rules
+    alert_engine.evaluate_telemetry(record)
+
     # Update State Management
     truck_id = record["truck_id"]
     temp = record["temperature"]
@@ -105,6 +134,8 @@ def process_telemetry_record(record: Dict[str, Any]):
             "truck_id": truck_id,
             "last_temperature": temp,
             "last_speed": record["speed"],
+            "latitude": record.get("latitude", 41.8781),
+            "longitude": record.get("longitude", -87.6298),
             "last_seen": record["timestamp"],
             "event_count": 1,
             "temp_sum": temp,
@@ -116,6 +147,8 @@ def process_telemetry_record(record: Dict[str, Any]):
         st = truck_state[truck_id]
         st["last_temperature"] = temp
         st["last_speed"] = record["speed"]
+        st["latitude"] = record.get("latitude", st.get("latitude"))
+        st["longitude"] = record.get("longitude", st.get("longitude"))
         st["last_seen"] = record["timestamp"]
         st["event_count"] += 1
         st["temp_sum"] += temp
@@ -150,7 +183,7 @@ def background_kafka_or_simulator():
         kafka_connected_flag = False
         print(f"⚡ Kafka connection not available ({e}). Running in resilient standalone simulation mode...")
         # Populate initial historical data
-        for _ in range(25):
+        for _ in range(35):
             process_telemetry_record(generate_mock_telemetry_event())
         
         while True:
@@ -162,29 +195,32 @@ def background_kafka_or_simulator():
 @app.get("/")
 def read_root():
     return {
-        "message": "Welcome to StreamForge Distributed Telemetry API",
+        "message": "Welcome to StreamForge Distributed Telemetry API v2.0",
         "documentation": "/docs",
         "health_check": "/health",
-        "telemetry": "/telemetry"
+        "telemetry": "/telemetry",
+        "prometheus_metrics": "/prometheus",
+        "websocket_stream": "/ws/telemetry"
     }
 
 
-# Health Endpoint (Required by Task & Architecture)
+# Health Endpoint
 @app.get("/health", response_model=HealthResponse)
 def get_health():
     uptime = (datetime.now(timezone.utc) - START_TIME).total_seconds()
     return {
         "status": "ONLINE",
         "service": "StreamForge Backend API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "uptime_seconds": round(uptime, 2),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "kafka_connected": kafka_connected_flag,
-        "total_events_processed": len(telemetry_buffer) + len(dlq_buffer)
+        "total_events_processed": len(telemetry_buffer) + len(dlq_buffer),
+        "active_alerts_count": len(alert_engine.get_alerts())
     }
 
 
-# Telemetry Endpoint (Primary)
+# Telemetry Endpoint
 @app.get("/telemetry")
 def get_telemetry(
     limit: int = Query(50, ge=1, le=500, description="Max telemetry records to return"),
@@ -207,13 +243,37 @@ def get_telemetry(
     }
 
 
-# Telemetre Endpoint (Alias for exact compatibility with prompt GET /telemetre)
+# Telemetre Alias Endpoint
 @app.get("/telemetre")
 def get_telemetre(
     limit: int = Query(50, ge=1, le=500),
     truck_id: Optional[str] = None
 ):
     return get_telemetry(limit=limit, truck_id=truck_id)
+
+
+# Telemetry Export Endpoint (CSV / JSON) - Declared before path param route
+@app.get("/telemetry/export")
+def export_telemetry(format: str = Query("csv", pattern="^(csv|json)$")):
+    if format == "json":
+        return telemetry_buffer
+
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["event_id", "truck_id", "temperature", "speed", "timestamp", "latitude", "longitude"]
+    )
+    writer.writeheader()
+    for row in telemetry_buffer:
+        filtered_row = {k: row.get(k, "") for k in writer.fieldnames}
+        writer.writerow(filtered_row)
+
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode("utf-8")),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=streamforge_telemetry_{int(time.time())}.csv"}
+    )
 
 
 # Single Truck Telemetry Endpoint
@@ -253,8 +313,63 @@ def get_metrics():
         "min_fleet_temperature": round(min(temps), 2),
         "max_fleet_temperature": round(max(temps), 2),
         "avg_fleet_speed": round(sum(speeds) / len(speeds), 1),
+        "active_alerts_count": len(alert_engine.get_alerts()),
         "truck_ids": list(truck_state.keys())
     }
+
+
+# Prometheus Standard Metrics Endpoint
+@app.get("/prometheus")
+def get_prometheus_metrics():
+    uptime = (datetime.now(timezone.utc) - START_TIME).total_seconds()
+    temps = [r["temperature"] for r in telemetry_buffer] if telemetry_buffer else [0.0]
+    avg_temp = round(sum(temps) / len(temps), 2) if temps else 0.0
+    kafka_val = 1 if kafka_connected_flag else 0
+    
+    metrics_str = f"""# HELP streamforge_uptime_seconds Total uptime of StreamForge API in seconds
+# TYPE streamforge_uptime_seconds gauge
+streamforge_uptime_seconds {uptime}
+
+# HELP streamforge_telemetry_events_total Total telemetry events in memory buffer
+# TYPE streamforge_telemetry_events_total counter
+streamforge_telemetry_events_total {len(telemetry_buffer)}
+
+# HELP streamforge_dlq_events_total Total dead-letter queue events intercepted
+# TYPE streamforge_dlq_events_total counter
+streamforge_dlq_events_total {len(dlq_buffer)}
+
+# HELP streamforge_active_trucks Number of active fleet trucks
+# TYPE streamforge_active_trucks gauge
+streamforge_active_trucks {len(truck_state)}
+
+# HELP streamforge_avg_temperature_celsius Average temperature across active fleet
+# TYPE streamforge_avg_temperature_celsius gauge
+streamforge_avg_temperature_celsius {avg_temp}
+
+# HELP streamforge_kafka_connected Kafka broker connection status (1=Connected, 0=Simulation)
+# TYPE streamforge_kafka_connected gauge
+streamforge_kafka_connected {kafka_val}
+
+# HELP streamforge_alerts_total Total active anomaly alerts triggered
+# TYPE streamforge_alerts_total counter
+streamforge_alerts_total {len(alert_engine.get_alerts())}
+"""
+    return Response(content=metrics_str, media_type="text/plain")
+
+
+# Alert Endpoints
+@app.get("/alerts")
+def get_alerts(limit: int = Query(50, ge=1, le=200), severity: Optional[str] = None):
+    return {
+        "count": len(alert_engine.get_alerts(limit=limit, severity=severity)),
+        "alerts": alert_engine.get_alerts(limit=limit, severity=severity)
+    }
+
+
+@app.post("/alerts/clear")
+def clear_alerts():
+    alert_engine.clear_alerts()
+    return {"status": "SUCCESS", "message": "Alert history cleared."}
 
 
 # State Store Endpoint (RocksDB / In-Memory State)
@@ -285,3 +400,14 @@ def post_telemetry(event: TelemetryItem):
         "event_id": record["event_id"],
         "truck_id": record["truck_id"]
     }
+
+
+# WebSockets Stream Endpoints
+@app.websocket("/ws/telemetry")
+async def websocket_telemetry_endpoint(websocket: WebSocket):
+    await ws_manager.connect_telemetry(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect_telemetry(websocket)
